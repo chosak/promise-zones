@@ -1,0 +1,1351 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>twarc wordcloud</title>
+<script src="http://d3js.org/d3.v3.min.js"></script>
+</head>
+<body>
+<script>
+
+  // embed Jason Davies' d3-cloud since it's not available in a CDN
+  (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g=(g.d3||(g.d3 = {}));g=(g.layout||(g.layout = {}));g.cloud = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+// Word cloud layout by Jason Davies, https://www.jasondavies.com/wordcloud/
+// Algorithm due to Jonathan Feinberg, http://static.mrfeinberg.com/bv_ch03.pdf
+
+var dispatch = require("d3-dispatch").dispatch;
+
+var cloudRadians = Math.PI / 180,
+    cw = 1 << 11 >> 5,
+    ch = 1 << 11;
+
+module.exports = function() {
+  var size = [256, 256],
+      text = cloudText,
+      font = cloudFont,
+      fontSize = cloudFontSize,
+      fontStyle = cloudFontNormal,
+      fontWeight = cloudFontNormal,
+      rotate = cloudRotate,
+      padding = cloudPadding,
+      spiral = archimedeanSpiral,
+      words = [],
+      timeInterval = Infinity,
+      event = dispatch("word", "end"),
+      timer = null,
+      random = Math.random,
+      cloud = {},
+      canvas = cloudCanvas;
+
+  cloud.canvas = function(_) {
+    return arguments.length ? (canvas = functor(_), cloud) : canvas;
+  };
+
+  cloud.start = function() {
+    var contextAndRatio = getContext(canvas()),
+        board = zeroArray((size[0] >> 5) * size[1]),
+        bounds = null,
+        n = words.length,
+        i = -1,
+        tags = [],
+        data = words.map(function(d, i) {
+          d.text = text.call(this, d, i);
+          d.font = font.call(this, d, i);
+          d.style = fontStyle.call(this, d, i);
+          d.weight = fontWeight.call(this, d, i);
+          d.rotate = rotate.call(this, d, i);
+          d.size = ~~fontSize.call(this, d, i);
+          d.padding = padding.call(this, d, i);
+          return d;
+        }).sort(function(a, b) { return b.size - a.size; });
+
+    if (timer) clearInterval(timer);
+    timer = setInterval(step, 0);
+    step();
+
+    return cloud;
+
+    function step() {
+      var start = Date.now();
+      while (Date.now() - start < timeInterval && ++i < n && timer) {
+        var d = data[i];
+        d.x = (size[0] * (random() + .5)) >> 1;
+        d.y = (size[1] * (random() + .5)) >> 1;
+        cloudSprite(contextAndRatio, d, data, i);
+        if (d.hasText && place(board, d, bounds)) {
+          tags.push(d);
+          event.word(d);
+          if (bounds) cloudBounds(bounds, d);
+          else bounds = [{x: d.x + d.x0, y: d.y + d.y0}, {x: d.x + d.x1, y: d.y + d.y1}];
+          // Temporary hack
+          d.x -= size[0] >> 1;
+          d.y -= size[1] >> 1;
+        }
+      }
+      if (i >= n) {
+        cloud.stop();
+        event.end(tags, bounds);
+      }
+    }
+  }
+
+  cloud.stop = function() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    return cloud;
+  };
+
+  function getContext(canvas) {
+    canvas.width = canvas.height = 1;
+    var ratio = Math.sqrt(canvas.getContext("2d").getImageData(0, 0, 1, 1).data.length >> 2);
+    canvas.width = (cw << 5) / ratio;
+    canvas.height = ch / ratio;
+
+    var context = canvas.getContext("2d");
+    context.fillStyle = context.strokeStyle = "red";
+    context.textAlign = "center";
+
+    return {context: context, ratio: ratio};
+  }
+
+  function place(board, tag, bounds) {
+    var perimeter = [{x: 0, y: 0}, {x: size[0], y: size[1]}],
+        startX = tag.x,
+        startY = tag.y,
+        maxDelta = Math.sqrt(size[0] * size[0] + size[1] * size[1]),
+        s = spiral(size),
+        dt = random() < .5 ? 1 : -1,
+        t = -dt,
+        dxdy,
+        dx,
+        dy;
+
+    while (dxdy = s(t += dt)) {
+      dx = ~~dxdy[0];
+      dy = ~~dxdy[1];
+
+      if (Math.min(Math.abs(dx), Math.abs(dy)) >= maxDelta) break;
+
+      tag.x = startX + dx;
+      tag.y = startY + dy;
+
+      if (tag.x + tag.x0 < 0 || tag.y + tag.y0 < 0 ||
+          tag.x + tag.x1 > size[0] || tag.y + tag.y1 > size[1]) continue;
+      // TODO only check for collisions within current bounds.
+      if (!bounds || !cloudCollide(tag, board, size[0])) {
+        if (!bounds || collideRects(tag, bounds)) {
+          var sprite = tag.sprite,
+              w = tag.width >> 5,
+              sw = size[0] >> 5,
+              lx = tag.x - (w << 4),
+              sx = lx & 0x7f,
+              msx = 32 - sx,
+              h = tag.y1 - tag.y0,
+              x = (tag.y + tag.y0) * sw + (lx >> 5),
+              last;
+          for (var j = 0; j < h; j++) {
+            last = 0;
+            for (var i = 0; i <= w; i++) {
+              board[x + i] |= (last << msx) | (i < w ? (last = sprite[j * w + i]) >>> sx : 0);
+            }
+            x += sw;
+          }
+          delete tag.sprite;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  cloud.timeInterval = function(_) {
+    return arguments.length ? (timeInterval = _ == null ? Infinity : _, cloud) : timeInterval;
+  };
+
+  cloud.words = function(_) {
+    return arguments.length ? (words = _, cloud) : words;
+  };
+
+  cloud.size = function(_) {
+    return arguments.length ? (size = [+_[0], +_[1]], cloud) : size;
+  };
+
+  cloud.font = function(_) {
+    return arguments.length ? (font = functor(_), cloud) : font;
+  };
+
+  cloud.fontStyle = function(_) {
+    return arguments.length ? (fontStyle = functor(_), cloud) : fontStyle;
+  };
+
+  cloud.fontWeight = function(_) {
+    return arguments.length ? (fontWeight = functor(_), cloud) : fontWeight;
+  };
+
+  cloud.rotate = function(_) {
+    return arguments.length ? (rotate = functor(_), cloud) : rotate;
+  };
+
+  cloud.text = function(_) {
+    return arguments.length ? (text = functor(_), cloud) : text;
+  };
+
+  cloud.spiral = function(_) {
+    return arguments.length ? (spiral = spirals[_] || _, cloud) : spiral;
+  };
+
+  cloud.fontSize = function(_) {
+    return arguments.length ? (fontSize = functor(_), cloud) : fontSize;
+  };
+
+  cloud.padding = function(_) {
+    return arguments.length ? (padding = functor(_), cloud) : padding;
+  };
+
+  cloud.random = function(_) {
+    return arguments.length ? (random = _, cloud) : random;
+  };
+
+  cloud.on = function() {
+    var value = event.on.apply(event, arguments);
+    return value === event ? cloud : value;
+  };
+
+  return cloud;
+};
+
+function cloudText(d) {
+  return d.text;
+}
+
+function cloudFont() {
+  return "serif";
+}
+
+function cloudFontNormal() {
+  return "normal";
+}
+
+function cloudFontSize(d) {
+  return Math.sqrt(d.value);
+}
+
+function cloudRotate() {
+  return (~~(Math.random() * 6) - 3) * 30;
+}
+
+function cloudPadding() {
+  return 1;
+}
+
+// Fetches a monochrome sprite bitmap for the specified text.
+// Load in batches for speed.
+function cloudSprite(contextAndRatio, d, data, di) {
+  if (d.sprite) return;
+  var c = contextAndRatio.context,
+      ratio = contextAndRatio.ratio;
+
+  c.clearRect(0, 0, (cw << 5) / ratio, ch / ratio);
+  var x = 0,
+      y = 0,
+      maxh = 0,
+      n = data.length;
+  --di;
+  while (++di < n) {
+    d = data[di];
+    c.save();
+    c.font = d.style + " " + d.weight + " " + ~~((d.size + 1) / ratio) + "px " + d.font;
+    var w = c.measureText(d.text + "m").width * ratio,
+        h = d.size << 1;
+    if (d.rotate) {
+      var sr = Math.sin(d.rotate * cloudRadians),
+          cr = Math.cos(d.rotate * cloudRadians),
+          wcr = w * cr,
+          wsr = w * sr,
+          hcr = h * cr,
+          hsr = h * sr;
+      w = (Math.max(Math.abs(wcr + hsr), Math.abs(wcr - hsr)) + 0x1f) >> 5 << 5;
+      h = ~~Math.max(Math.abs(wsr + hcr), Math.abs(wsr - hcr));
+    } else {
+      w = (w + 0x1f) >> 5 << 5;
+    }
+    if (h > maxh) maxh = h;
+    if (x + w >= (cw << 5)) {
+      x = 0;
+      y += maxh;
+      maxh = 0;
+    }
+    if (y + h >= ch) break;
+    c.translate((x + (w >> 1)) / ratio, (y + (h >> 1)) / ratio);
+    if (d.rotate) c.rotate(d.rotate * cloudRadians);
+    c.fillText(d.text, 0, 0);
+    if (d.padding) c.lineWidth = 2 * d.padding, c.strokeText(d.text, 0, 0);
+    c.restore();
+    d.width = w;
+    d.height = h;
+    d.xoff = x;
+    d.yoff = y;
+    d.x1 = w >> 1;
+    d.y1 = h >> 1;
+    d.x0 = -d.x1;
+    d.y0 = -d.y1;
+    d.hasText = true;
+    x += w;
+  }
+  var pixels = c.getImageData(0, 0, (cw << 5) / ratio, ch / ratio).data,
+      sprite = [];
+  while (--di >= 0) {
+    d = data[di];
+    if (!d.hasText) continue;
+    var w = d.width,
+        w32 = w >> 5,
+        h = d.y1 - d.y0;
+    // Zero the buffer
+    for (var i = 0; i < h * w32; i++) sprite[i] = 0;
+    x = d.xoff;
+    if (x == null) return;
+    y = d.yoff;
+    var seen = 0,
+        seenRow = -1;
+    for (var j = 0; j < h; j++) {
+      for (var i = 0; i < w; i++) {
+        var k = w32 * j + (i >> 5),
+            m = pixels[((y + j) * (cw << 5) + (x + i)) << 2] ? 1 << (31 - (i % 32)) : 0;
+        sprite[k] |= m;
+        seen |= m;
+      }
+      if (seen) seenRow = j;
+      else {
+        d.y0++;
+        h--;
+        j--;
+        y++;
+      }
+    }
+    d.y1 = d.y0 + seenRow;
+    d.sprite = sprite.slice(0, (d.y1 - d.y0) * w32);
+  }
+}
+
+// Use mask-based collision detection.
+function cloudCollide(tag, board, sw) {
+  sw >>= 5;
+  var sprite = tag.sprite,
+      w = tag.width >> 5,
+      lx = tag.x - (w << 4),
+      sx = lx & 0x7f,
+      msx = 32 - sx,
+      h = tag.y1 - tag.y0,
+      x = (tag.y + tag.y0) * sw + (lx >> 5),
+      last;
+  for (var j = 0; j < h; j++) {
+    last = 0;
+    for (var i = 0; i <= w; i++) {
+      if (((last << msx) | (i < w ? (last = sprite[j * w + i]) >>> sx : 0))
+          & board[x + i]) return true;
+    }
+    x += sw;
+  }
+  return false;
+}
+
+function cloudBounds(bounds, d) {
+  var b0 = bounds[0],
+      b1 = bounds[1];
+  if (d.x + d.x0 < b0.x) b0.x = d.x + d.x0;
+  if (d.y + d.y0 < b0.y) b0.y = d.y + d.y0;
+  if (d.x + d.x1 > b1.x) b1.x = d.x + d.x1;
+  if (d.y + d.y1 > b1.y) b1.y = d.y + d.y1;
+}
+
+function collideRects(a, b) {
+  return a.x + a.x1 > b[0].x && a.x + a.x0 < b[1].x && a.y + a.y1 > b[0].y && a.y + a.y0 < b[1].y;
+}
+
+function archimedeanSpiral(size) {
+  var e = size[0] / size[1];
+  return function(t) {
+    return [e * (t *= .1) * Math.cos(t), t * Math.sin(t)];
+  };
+}
+
+function rectangularSpiral(size) {
+  var dy = 4,
+      dx = dy * size[0] / size[1],
+      x = 0,
+      y = 0;
+  return function(t) {
+    var sign = t < 0 ? -1 : 1;
+    // See triangular numbers: T_n = n * (n + 1) / 2.
+    switch ((Math.sqrt(1 + 4 * sign * t) - sign) & 3) {
+      case 0:  x += dx; break;
+      case 1:  y += dy; break;
+      case 2:  x -= dx; break;
+      default: y -= dy; break;
+    }
+    return [x, y];
+  };
+}
+
+// TODO reuse arrays?
+function zeroArray(n) {
+  var a = [],
+      i = -1;
+  while (++i < n) a[i] = 0;
+  return a;
+}
+
+function cloudCanvas() {
+  return document.createElement("canvas");
+}
+
+function functor(d) {
+  return typeof d === "function" ? d : function() { return d; };
+}
+
+var spirals = {
+  archimedean: archimedeanSpiral,
+  rectangular: rectangularSpiral
+};
+
+},{"d3-dispatch":2}],2:[function(require,module,exports){
+(function (global, factory) {
+  typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+  typeof define === 'function' && define.amd ? define(['exports'], factory) :
+  factory((global.dispatch = {}));
+}(this, function (exports) { 'use strict';
+
+  function Dispatch(types) {
+    var i = -1,
+        n = types.length,
+        callbacksByType = {},
+        callbackByName = {},
+        type,
+        that = this;
+
+    that.on = function(type, callback) {
+      type = parseType(type);
+
+      // Return the current callback, if any.
+      if (arguments.length < 2) {
+        return (callback = callbackByName[type.name]) && callback.value;
+      }
+
+      // If a type was specified…
+      if (type.type) {
+        var callbacks = callbacksByType[type.type],
+            callback0 = callbackByName[type.name],
+            i;
+
+        // Remove the current callback, if any, using copy-on-remove.
+        if (callback0) {
+          callback0.value = null;
+          i = callbacks.indexOf(callback0);
+          callbacksByType[type.type] = callbacks = callbacks.slice(0, i).concat(callbacks.slice(i + 1));
+          delete callbackByName[type.name];
+        }
+
+        // Add the new callback, if any.
+        if (callback) {
+          callback = {value: callback};
+          callbackByName[type.name] = callback;
+          callbacks.push(callback);
+        }
+      }
+
+      // Otherwise, if a null callback was specified, remove all callbacks with the given name.
+      else if (callback == null) {
+        for (var otherType in callbacksByType) {
+          if (callback = callbackByName[otherType + type.name]) {
+            callback.value = null;
+            var callbacks = callbacksByType[otherType], i = callbacks.indexOf(callback);
+            callbacksByType[otherType] = callbacks.slice(0, i).concat(callbacks.slice(i + 1));
+            delete callbackByName[callback.name];
+          }
+        }
+      }
+
+      return that;
+    };
+
+    while (++i < n) {
+      type = types[i] + "";
+      if (!type || (type in that)) throw new Error("illegal or duplicate type: " + type);
+      callbacksByType[type] = [];
+      that[type] = applier(type);
+    }
+
+    function parseType(type) {
+      var i = (type += "").indexOf("."), name = type;
+      if (i >= 0) type = type.slice(0, i); else name += ".";
+      if (type && !callbacksByType.hasOwnProperty(type)) throw new Error("unknown type: " + type);
+      return {type: type, name: name};
+    }
+
+    function applier(type) {
+      return function() {
+        var callbacks = callbacksByType[type], // Defensive reference; copy-on-remove.
+            callback,
+            callbackValue,
+            i = -1,
+            n = callbacks.length;
+
+        while (++i < n) {
+          if (callbackValue = (callback = callbacks[i]).value) {
+            callbackValue.apply(this, arguments);
+          }
+        }
+
+        return that;
+      };
+    }
+  }
+
+  function dispatch() {
+    return new Dispatch(arguments);
+  }
+
+  dispatch.prototype = Dispatch.prototype; // allow instanceof
+
+  exports.dispatch = dispatch;
+
+}));
+},{}]},{},[1])(1)
+});
+
+  var fill = d3.scale.category20();
+  var words = [
+  {
+    "text": "exit",
+    "size": 117
+  },
+  {
+    "text": "incident",
+    "size": 111
+  },
+  {
+    "text": "miles",
+    "size": 65
+  },
+  {
+    "text": "hartford,",
+    "size": 61
+  },
+  {
+    "text": "april",
+    "size": 53
+  },
+  {
+    "text": "friday",
+    "size": 52
+  },
+  {
+    "text": "ct)",
+    "size": 48
+  },
+  {
+    "text": "click",
+    "size": 48
+  },
+  {
+    "text": "cleared:",
+    "size": 48
+  },
+  {
+    "text": "update:",
+    "size": 45
+  },
+  {
+    "text": "latest",
+    "size": 45
+  },
+  {
+    "text": "we're",
+    "size": 44
+  },
+  {
+    "text": "rd)",
+    "size": 43
+  },
+  {
+    "text": "shots",
+    "size": 43
+  },
+  {
+    "text": "i'm",
+    "size": 43
+  },
+  {
+    "text": "before",
+    "size": 40
+  },
+  {
+    "text": "beyond",
+    "size": 39
+  },
+  {
+    "text": "hartford",
+    "size": 37
+  },
+  {
+    "text": "robert",
+    "size": 35
+  },
+  {
+    "text": "apply:",
+    "size": 35
+  },
+  {
+    "text": "half",
+    "size": 35
+  },
+  {
+    "text": "ladies",
+    "size": 34
+  },
+  {
+    "text": "want",
+    "size": 34
+  },
+  {
+    "text": "see",
+    "size": 34
+  },
+  {
+    "text": "anyone",
+    "size": 32
+  },
+  {
+    "text": "opening",
+    "size": 32
+  },
+  {
+    "text": "out",
+    "size": 32
+  },
+  {
+    "text": "recommend",
+    "size": 32
+  },
+  {
+    "text": "work",
+    "size": 32
+  },
+  {
+    "text": "creative",
+    "size": 31
+  },
+  {
+    "text": "here:",
+    "size": 31
+  },
+  {
+    "text": "st)",
+    "size": 31
+  },
+  {
+    "text": "day",
+    "size": 31
+  },
+  {
+    "text": "great",
+    "size": 31
+  },
+  {
+    "text": "manager",
+    "size": 29
+  },
+  {
+    "text": "accounting",
+    "size": 28
+  },
+  {
+    "text": "details:",
+    "size": 27
+  },
+  {
+    "text": "ct!",
+    "size": 27
+  },
+  {
+    "text": "ave)",
+    "size": 26
+  },
+  {
+    "text": "college",
+    "size": 26
+  },
+  {
+    "text": "alert:",
+    "size": 24
+  },
+  {
+    "text": "service",
+    "size": 24
+  },
+  {
+    "text": "thank",
+    "size": 24
+  },
+  {
+    "text": "community",
+    "size": 24
+  },
+  {
+    "text": "thanks",
+    "size": 24
+  },
+  {
+    "text": "low",
+    "size": 24
+  },
+  {
+    "text": "ct?",
+    "size": 24
+  },
+  {
+    "text": "adpi",
+    "size": 24
+  },
+  {
+    "text": "join",
+    "size": 24
+  },
+  {
+    "text": "analyst",
+    "size": 24
+  },
+  {
+    "text": "finance",
+    "size": 24
+  },
+  {
+    "text": "main",
+    "size": 23
+  },
+  {
+    "text": "fit",
+    "size": 23
+  },
+  {
+    "text": "bus",
+    "size": 23
+  },
+  {
+    "text": "ymca",
+    "size": 23
+  },
+  {
+    "text": "read",
+    "size": 23
+  },
+  {
+    "text": "taking",
+    "size": 23
+  },
+  {
+    "text": "capital",
+    "size": 23
+  },
+  {
+    "text": "wilson-gray\u2026",
+    "size": 23
+  },
+  {
+    "text": "west\ud83d\ude31\ud83d\ude31",
+    "size": 22
+  },
+  {
+    "text": "financial",
+    "size": 22
+  },
+  {
+    "text": "fit:",
+    "size": 22
+  },
+  {
+    "text": "talents",
+    "size": 22
+  },
+  {
+    "text": "eb)",
+    "size": 22
+  },
+  {
+    "text": "down",
+    "size": 22
+  },
+  {
+    "text": "lit\u203c\ufe0f",
+    "size": 22
+  },
+  {
+    "text": "x32b)",
+    "size": 22
+  },
+  {
+    "text": "ct:",
+    "size": 22
+  },
+  {
+    "text": "trumbull",
+    "size": 22
+  },
+  {
+    "text": "x32a",
+    "size": 22
+  },
+  {
+    "text": "lord",
+    "size": 22
+  },
+  {
+    "text": "tonight",
+    "size": 22
+  },
+  {
+    "text": "team!",
+    "size": 22
+  },
+  {
+    "text": "near",
+    "size": 22
+  },
+  {
+    "text": "group",
+    "size": 22
+  },
+  {
+    "text": "interested",
+    "size": 22
+  },
+  {
+    "text": "senior",
+    "size": 22
+  },
+  {
+    "text": "another",
+    "size": 22
+  },
+  {
+    "text": "going",
+    "size": 22
+  },
+  {
+    "text": "check",
+    "size": 22
+  },
+  {
+    "text": "you:",
+    "size": 22
+  },
+  {
+    "text": "everyone",
+    "size": 22
+  },
+  {
+    "text": "llc",
+    "size": 22
+  },
+  {
+    "text": "hall",
+    "size": 21
+  },
+  {
+    "text": "love",
+    "size": 21
+  },
+  {
+    "text": "team",
+    "size": 21
+  },
+  {
+    "text": "accountant",
+    "size": 21
+  },
+  {
+    "text": "come",
+    "size": 21
+  },
+  {
+    "text": "banquet",
+    "size": 21
+  },
+  {
+    "text": "ct,",
+    "size": 21
+  },
+  {
+    "text": "professional",
+    "size": 21
+  },
+  {
+    "text": "work,",
+    "size": 21
+  },
+  {
+    "text": "construction",
+    "size": 21
+  },
+  {
+    "text": "biggest\u2026",
+    "size": 21
+  },
+  {
+    "text": "it's",
+    "size": 21
+  },
+  {
+    "text": "you're",
+    "size": 21
+  },
+  {
+    "text": "location\ud83d\udccdwe",
+    "size": 21
+  },
+  {
+    "text": "united",
+    "size": 21
+  },
+  {
+    "text": "sunday",
+    "size": 21
+  },
+  {
+    "text": "connecticut",
+    "size": 19
+  },
+  {
+    "text": "square",
+    "size": 19
+  },
+  {
+    "text": "here",
+    "size": 19
+  },
+  {
+    "text": "account",
+    "size": 19
+  },
+  {
+    "text": "party",
+    "size": 19
+  },
+  {
+    "text": "overseer",
+    "size": 19
+  },
+  {
+    "text": "building",
+    "size": 19
+  },
+  {
+    "text": "downtown",
+    "size": 19
+  },
+  {
+    "text": "documentation",
+    "size": 19
+  },
+  {
+    "text": "days",
+    "size": 19
+  },
+  {
+    "text": "recruiter",
+    "size": 19
+  },
+  {
+    "text": "marichal",
+    "size": 19
+  },
+  {
+    "text": "good",
+    "size": 19
+  },
+  {
+    "text": "citadel",
+    "size": 19
+  },
+  {
+    "text": "monts,",
+    "size": 19
+  },
+  {
+    "text": "staff",
+    "size": 19
+  },
+  {
+    "text": "one",
+    "size": 19
+  },
+  {
+    "text": "lounge",
+    "size": 19
+  },
+  {
+    "text": "official\u2026",
+    "size": 19
+  },
+  {
+    "text": "watch",
+    "size": 19
+  },
+  {
+    "text": "don't",
+    "size": 19
+  },
+  {
+    "text": "wilson-gray",
+    "size": 19
+  },
+  {
+    "text": "with\u2026",
+    "size": 19
+  },
+  {
+    "text": "tide",
+    "size": 19
+  },
+  {
+    "text": "services",
+    "size": 19
+  },
+  {
+    "text": "livestream:\u2026",
+    "size": 19
+  },
+  {
+    "text": "away\u203c\ufe0f",
+    "size": 19
+  },
+  {
+    "text": "know",
+    "size": 19
+  },
+  {
+    "text": "executive",
+    "size": 19
+  },
+  {
+    "text": "greater",
+    "size": 19
+  },
+  {
+    "text": "nice",
+    "size": 18
+  },
+  {
+    "text": "wb)",
+    "size": 18
+  },
+  {
+    "text": "project",
+    "size": 18
+  },
+  {
+    "text": "right",
+    "size": 18
+  },
+  {
+    "text": "health",
+    "size": 18
+  },
+  {
+    "text": "sun",
+    "size": 18
+  },
+  {
+    "text": "time",
+    "size": 18
+  },
+  {
+    "text": "made",
+    "size": 18
+  },
+  {
+    "text": "technology",
+    "size": 18
+  },
+  {
+    "text": "state",
+    "size": 18
+  },
+  {
+    "text": "insurance",
+    "size": 18
+  },
+  {
+    "text": "house",
+    "size": 18
+  },
+  {
+    "text": "sally's",
+    "size": 18
+  },
+  {
+    "text": "buzzin",
+    "size": 18
+  },
+  {
+    "text": "asylum",
+    "size": 18
+  },
+  {
+    "text": "big",
+    "size": 18
+  },
+  {
+    "text": "saint",
+    "size": 18
+  },
+  {
+    "text": "junior",
+    "size": 18
+  },
+  {
+    "text": "center",
+    "size": 18
+  },
+  {
+    "text": "over",
+    "size": 18
+  },
+  {
+    "text": "accountemps",
+    "size": 18
+  },
+  {
+    "text": "management",
+    "size": 18
+  },
+  {
+    "text": "nurse",
+    "size": 18
+  },
+  {
+    "text": "business",
+    "size": 18
+  },
+  {
+    "text": "starbucks",
+    "size": 18
+  },
+  {
+    "text": "more",
+    "size": 18
+  },
+  {
+    "text": "clerk",
+    "size": 18
+  },
+  {
+    "text": "birthday",
+    "size": 18
+  },
+  {
+    "text": "to\u2026",
+    "size": 18
+  },
+  {
+    "text": "technical",
+    "size": 18
+  },
+  {
+    "text": "show",
+    "size": 18
+  },
+  {
+    "text": "salad",
+    "size": 18
+  },
+  {
+    "text": "grill",
+    "size": 18
+  },
+  {
+    "text": "camerabar",
+    "size": 18
+  },
+  {
+    "text": "black",
+    "size": 18
+  },
+  {
+    "text": "rhythmtainment",
+    "size": 18
+  },
+  {
+    "text": "posted",
+    "size": 18
+  },
+  {
+    "text": "kelly",
+    "size": 18
+  },
+  {
+    "text": "engineer",
+    "size": 17
+  },
+  {
+    "text": "looking",
+    "size": 17
+  },
+  {
+    "text": "rib,",
+    "size": 17
+  },
+  {
+    "text": "specialist",
+    "size": 17
+  },
+  {
+    "text": "sure",
+    "size": 17
+  },
+  {
+    "text": "glamming",
+    "size": 17
+  },
+  {
+    "text": "sb)",
+    "size": 17
+  },
+  {
+    "text": "data",
+    "size": 17
+  },
+  {
+    "text": "specialist-",
+    "size": 17
+  },
+  {
+    "text": "company",
+    "size": 17
+  },
+  {
+    "text": "happens",
+    "size": 17
+  },
+  {
+    "text": "anointed,",
+    "size": 17
+  },
+  {
+    "text": "actuarial",
+    "size": 17
+  },
+  {
+    "text": "litigation",
+    "size": 17
+  },
+  {
+    "text": "life",
+    "size": 17
+  },
+  {
+    "text": "joins",
+    "size": 17
+  },
+  {
+    "text": "travelers",
+    "size": 17
+  },
+  {
+    "text": "riseup",
+    "size": 17
+  },
+  {
+    "text": "help",
+    "size": 17
+  },
+  {
+    "text": "shout",
+    "size": 17
+  },
+  {
+    "text": "prophetic",
+    "size": 17
+  },
+  {
+    "text": "onion",
+    "size": 17
+  },
+  {
+    "text": "personal",
+    "size": 17
+  },
+  {
+    "text": "auditor",
+    "size": 17
+  },
+  {
+    "text": "harc,",
+    "size": 17
+  },
+  {
+    "text": "francis",
+    "size": 17
+  },
+  {
+    "text": "invite",
+    "size": 17
+  },
+  {
+    "text": "dunns",
+    "size": 17
+  },
+  {
+    "text": "safely",
+    "size": 17
+  },
+  {
+    "text": "event\u2026",
+    "size": 17
+  },
+  {
+    "text": "bring",
+    "size": 17
+  },
+  {
+    "text": "talking",
+    "size": 17
+  },
+  {
+    "text": "fox",
+    "size": 17
+  }
+]
+
+  d3.layout.cloud().size([800, 800])
+      .words(words)
+      .rotate(function() { return ~~(Math.random() * 2) * 90; })
+      .font("Impact")
+      .fontSize(function(d) { return d.size; })
+      .on("end", draw)
+      .start();
+
+  function draw(words) {
+    d3.select("body").append("svg")
+        .attr("width", 1000)
+        .attr("height", 1000)
+      .append("g")
+        .attr("transform", "translate(400,400)")
+      .selectAll("text")
+        .data(words)
+      .enter().append("text")
+        .style("font-size", function(d) { return d.size + "px"; })
+        .style("font-family", "Impact")
+        .style("fill", function(d, i) { return fill(i); })
+        .attr("text-anchor", "middle")
+        .attr("transform", function(d) {
+          return "translate(" + [d.x, d.y] + ")rotate(" + d.rotate + ")";
+        })
+        .text(function(d) { return d.text; });
+  }
+</script>
+</body>
+</html>
+
