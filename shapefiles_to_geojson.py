@@ -1,10 +1,14 @@
 '''
-Converts Promise Zone shapefiles to JSON files with bounding box, coordinates,
-center point, and effective radius in miles. All coordinates are lon, lat.
+Converts Promise Zone shapefiles to GeoJSON Polygon files. Also dumps out
+center point (lat, lng) and radius in miles to the console.
 
 Download input shapefiles from:
 http://egis.hud.opendata.arcgis.com/datasets/a10cbd9187a34bd2a28574a3cfe12e64_0
+
+Assumes input shapefiles in a local "shapefiles" subdirectory.
 '''
+from __future__ import print_function
+
 import json
 import os
 import shapefile
@@ -14,7 +18,7 @@ from geopy.distance import vincenty
 
 INPUT = 'shapefiles/Promise_Zones'
 NAME_FIELD = 'PZ_Name'
-OUTPUT = 'json'
+OUTPUT = 'geojson'
 
 
 def distance_miles(p1, p2):
@@ -32,8 +36,6 @@ sf = shapefile.Reader(INPUT)
 for i, field in enumerate(sf.fields[1:]):
     if NAME_FIELD == field[0]:
         name_index = i
-
-all_pzs = {}
 
 if not os.path.exists(OUTPUT):
     os.makedirs(OUTPUT)
@@ -54,18 +56,13 @@ for sr in sf.iterShapeRecords():
         if distance > radius:
             radius = distance
 
-    pz_data = {
-        'bbox': list(bbox),
-        'coords': coords,
-        'center': center,
-        'radius_miles': radius,
+    geojson = {
+        'type': 'Polygon',
+        'coordinates': [list(map(list, coords))],
     }
 
-    filename = name.replace(' ', '_').lower() + '.json'
+    filename = name.replace(' ', '_').lower() + '.geojson'
     with open(os.path.join(OUTPUT, filename), 'w') as f:
-        f.write(json.dumps(pz_data))
+        f.write(json.dumps(geojson))
 
-    all_pzs[name] = pz_data
-
-with open(os.path.join(OUTPUT, 'all.json'), 'w') as f:
-    f.write(json.dumps(all_pzs))
+    print('{}: {},{},{}mi'.format(name, center[1], center[0], radius))
